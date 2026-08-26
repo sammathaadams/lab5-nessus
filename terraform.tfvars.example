@@ -1,0 +1,17 @@
+allowed_source_ip = "YOUR_PUBLIC_IP/32"
+
+# Optional overrides — the defaults in variables.tf are fine for most runs:
+# location       = "West US 2"
+# server_vm_size = "Standard_D2s_v3"
+# linux_vm_size  = "Standard_D2s_v3"
+# client_vm_size = "Standard_D2s_v3"
+# nessus_vm_size = "Standard_D2s_v3"
+
+# There is no admin_password entry here — and no TF_VAR_admin_password env
+# var to set either. Terraform generates the VM admin/SSH password itself
+# (random_password.admin in keyvault.tf) and stores it in Key Vault at
+# apply time. Nobody types, sets, or carries this value. After a
+# successful apply, retrieve it with:
+#
+#   az keyvault secret show --vault-name <kv-name-from-terraform-output> \
+#     --name vm-admin-password --query value -o tsv

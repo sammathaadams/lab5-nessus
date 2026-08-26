@@ -1,0 +1,53 @@
+name: Terraform Checks
+
+# Pure static analysis — parses .tf files for syntax problems and known
+# security misconfigurations. Needs ZERO Azure credentials, never touches
+# Azure, and never runs apply/plan against real state. Completely separate
+# from run-scan.yml's OIDC-authenticated permissions — this is Continuous
+# Integration in the literal sense: an automatic check on every push/PR,
+# nothing more. Runs on every push/PR touching *.tf, safe even on a PR from
+# a fork with no repo secrets.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**.tf"
+  pull_request:
+    paths:
+      - "**.tf"
+
+permissions:
+  contents: read
+
+jobs:
+  fmt-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.5"
+
+      - name: terraform fmt -check
+        run: terraform fmt -check -recursive
+
+      - name: terraform init (no backend — just downloads providers)
+        run: terraform init -backend=false
+
+      - name: terraform validate
+        run: terraform validate
+
+  tfsec:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run tfsec
+        uses: aquasecurity/tfsec-action@v1.0.3
+        with:
+          working_directory: .

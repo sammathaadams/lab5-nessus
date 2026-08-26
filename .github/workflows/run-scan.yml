@@ -1,0 +1,122 @@
+name: Run Nessus Scan
+
+# This pipeline ONLY operates against infrastructure that already exists —
+# it never provisions or destroys anything. Infra lifecycle (terraform
+# apply/destroy) is handled locally by whoever owns the environment, per
+# SOP Section 2. This workflow just knows three facts about that
+# environment — NESSUS01_IP, RESOURCE_GROUP, NSG_NAME — set once as repo
+# Variables after a deploy, and operates a scan against it. This mirrors
+# how a real security team's scan pipeline usually can't (and shouldn't)
+# also hold rights to create/destroy the infra it scans — see SOP Section
+# 13.1 for the scoped-down Azure role (Network Contributor on this one
+# NSG, not Contributor on the subscription) that enforces this.
+#
+# No `actions/checkout` step here on purpose — this job doesn't read any
+# file out of the repo, only GitHub-provided secrets/variables and live
+# Nessus/Azure API responses.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"   # every Monday, 06:00 UTC — edit or delete this line for manual-only
+
+permissions:
+  id-token: write   # required for OIDC login to Azure
+  contents: read
+
+jobs:
+  run-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Azure login (OIDC — no stored client secret)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Get this runner's public IP
+        id: runner_ip
+        run: echo "ip=$(curl -s ifconfig.me)" >> "$GITHUB_OUTPUT"
+
+      - name: Open a temporary NSG rule for the runner (port 8834 only)
+        # Raw az cli, not Terraform — this identity's only Azure permission
+        # is Network Contributor on this one NSG (see SOP 13.1). It can't
+        # touch a VM even if it wanted to. Scoped to this run's runner IP,
+        # removed again in the last step below.
+        run: |
+          az network nsg rule create \
+            --resource-group "${{ vars.RESOURCE_GROUP }}" \
+            --nsg-name "${{ vars.NSG_NAME }}" \
+            --name Allow-CI-Nessus-Temp \
+            --priority 1099 \
+            --direction Inbound \
+            --access Allow \
+            --protocol Tcp \
+            --destination-port-ranges 8834 \
+            --source-address-prefixes "${{ steps.runner_ip.outputs.ip }}/32"
+
+      - name: Wait for Nessus to answer
+        run: |
+          NESSUS_URL="https://${{ vars.NESSUS01_IP }}:8834"
+          for i in $(seq 1 20); do
+            if curl -sk --max-time 5 "$NESSUS_URL/server/status" | grep -q "ready"; then
+              echo "Nessus is up"; exit 0
+            fi
+            echo "Waiting for Nessus... ($i/20)"; sleep 15
+          done
+          echo "Nessus never came up — is NESSUS01 running and Nessus installed/activated? See SOP Section 5."; exit 1
+
+      - name: Launch the existing Nessus scan
+        env:
+          NESSUS_URL: https://${{ vars.NESSUS01_IP }}:8834
+          API_KEYS: accessKey=${{ secrets.NESSUS_ACCESS_KEY }}; secretKey=${{ secrets.NESSUS_SECRET_KEY }}
+        run: |
+          curl -sk -X POST "$NESSUS_URL/scans/${{ vars.NESSUS_SCAN_ID }}/launch" \
+            -H "X-ApiKeys: $API_KEYS"
+
+      - name: Poll until the scan completes
+        env:
+          NESSUS_URL: https://${{ vars.NESSUS01_IP }}:8834
+          API_KEYS: accessKey=${{ secrets.NESSUS_ACCESS_KEY }}; secretKey=${{ secrets.NESSUS_SECRET_KEY }}
+        run: |
+          for i in $(seq 1 60); do
+            STATUS=$(curl -sk "$NESSUS_URL/scans/${{ vars.NESSUS_SCAN_ID }}" -H "X-ApiKeys: $API_KEYS" | jq -r '.info.status')
+            echo "Scan status: $STATUS ($i/60)"
+            if [ "$STATUS" == "completed" ]; then exit 0; fi
+            sleep 30
+          done
+          echo "Scan did not complete within 30 minutes"; exit 1
+
+      - name: Request and download the PDF report
+        env:
+          NESSUS_URL: https://${{ vars.NESSUS01_IP }}:8834
+          API_KEYS: accessKey=${{ secrets.NESSUS_ACCESS_KEY }}; secretKey=${{ secrets.NESSUS_SECRET_KEY }}
+        run: |
+          FILE_ID=$(curl -sk -X POST "$NESSUS_URL/scans/${{ vars.NESSUS_SCAN_ID }}/export" \
+            -H "X-ApiKeys: $API_KEYS" -H "Content-Type: application/json" \
+            -d '{"format":"pdf"}' | jq -r '.file')
+
+          for i in $(seq 1 20); do
+            READY=$(curl -sk "$NESSUS_URL/scans/${{ vars.NESSUS_SCAN_ID }}/export/$FILE_ID/status" -H "X-ApiKeys: $API_KEYS" | jq -r '.status')
+            if [ "$READY" == "ready" ]; then break; fi
+            echo "Export not ready yet ($i/20)"; sleep 10
+          done
+
+          curl -sk "$NESSUS_URL/scans/${{ vars.NESSUS_SCAN_ID }}/export/$FILE_ID/download" \
+            -H "X-ApiKeys: $API_KEYS" -o nessus-report.pdf
+
+      - name: Upload report as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nessus-report-${{ github.run_number }}
+          path: nessus-report.pdf
+          retention-days: 30
+
+      - name: Remove the temporary NSG rule
+        if: always()
+        run: |
+          az network nsg rule delete \
+            --resource-group "${{ vars.RESOURCE_GROUP }}" \
+            --nsg-name "${{ vars.NSG_NAME }}" \
+            --name Allow-CI-Nessus-Temp || true

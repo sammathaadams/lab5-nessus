@@ -1,0 +1,18 @@
+# Terraform
+# .terraform.lock.hcl is intentionally NOT ignored — commit it so everyone
+# who runs this gets the same provider versions.
+.terraform/
+*.tfvars
+*.tfvars.json
+!terraform.tfvars.example
+terraform.tfstate
+terraform.tfstate.backup
+crash.log
+crash.*.log
+
+# Local secrets / scratch
+*.pem
+*.key
+
+# Local reference copies — not needed in the public repo, .md is canonical
+SOP_Lab5_Nessus_Vulnerability_Scanning.txt
