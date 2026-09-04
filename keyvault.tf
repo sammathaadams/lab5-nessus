@@ -46,7 +46,30 @@ resource "azurerm_key_vault" "lab_kv" {
   sku_name            = "standard"
 
   soft_delete_retention_days = 7
-  purge_protection_enabled   = false
+
+  # tfsec: azure-keyvault-no-purge — deliberately NOT enabled. Purge
+  # protection is a one-way switch in Azure: once on, it can never be
+  # turned off, and a purged/deleted vault name stays reserved for up to
+  # 90 days. This lab gets destroyed and redeployed repeatedly during
+  # normal use — enabling this would mean every teardown risks blocking
+  # the next `terraform apply` from reusing the same Key Vault name for
+  # up to 90 days. Accepted risk for a lab environment; would flip this
+  # to true for anything long-lived or production.
+  #tfsec:ignore:azure-keyvault-no-purge
+  purge_protection_enabled = false
+
+  # tfsec: azure-keyvault-specify-network-acl — fixed, not suppressed.
+  # Without this block, the vault's data plane (secrets) is reachable
+  # from any network as long as the caller has valid Azure AD RBAC —
+  # this adds a second layer scoped to the same IP already trusted
+  # everywhere else in this lab (main.tf's NSG rules use the same
+  # variable). default_action = Deny means only that IP (or trusted
+  # first-party Azure services) can reach it at all, regardless of RBAC.
+  network_acls {
+    default_action = "Deny"
+    bypass         = "AzureServices"
+    ip_rules       = [var.allowed_source_ip]
+  }
 
   tags = {
     Environment = "Lab"
@@ -57,13 +80,32 @@ resource "azurerm_key_vault" "lab_kv" {
 resource "azurerm_role_assignment" "kv_deployer_access" {
   scope                = azurerm_key_vault.lab_kv.id
   role_definition_name = "Key Vault Secrets Officer"
-  principal_id          = data.azurerm_client_config.current.object_id
+  principal_id         = data.azurerm_client_config.current.object_id
+}
+
+# Stable, one-time-computed expiry for the secret below. Deliberately NOT
+# using timestamp()+offset inline — timestamp() re-evaluates on every
+# plan, which would show a spurious "changed" diff on every single
+# `terraform plan` even though nothing actually changed. time_offset is a
+# real managed resource: it computes its value once, at creation, and
+# only changes if offset_days itself changes.
+resource "time_offset" "secret_expiry" {
+  offset_days = 90
 }
 
 resource "azurerm_key_vault_secret" "admin_password" {
   name         = "vm-admin-password"
   value        = random_password.admin.result
   key_vault_id = azurerm_key_vault.lab_kv.id
+
+  # tfsec: azure-keyvault-content-type-for-secret — fixed. Purely
+  # descriptive metadata, no functional effect.
+  content_type = "text/plain"
+
+  # tfsec: azure-keyvault-ensure-secret-expiry — fixed. 90 days from
+  # whenever this secret was actually created (see time_offset above),
+  # not a hardcoded date that would become meaningless over time.
+  expiration_date = time_offset.secret_expiry.rfc3339
 
   depends_on = [azurerm_role_assignment.kv_deployer_access]
 

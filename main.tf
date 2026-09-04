@@ -313,8 +313,17 @@ resource "azurerm_linux_virtual_machine" "ubuntu01" {
   resource_group_name = azurerm_resource_group.rg.name
   size                = var.linux_vm_size
 
-  admin_username                 = var.admin_username
-  admin_password                 = random_password.admin.result
+  admin_username = var.admin_username
+  admin_password = random_password.admin.result
+  # tfsec: azure-compute-disable-password-authentication — deliberately
+  # NOT disabled. The whole point of this VM in the lab is to demonstrate
+  # an SSH/password credentialed Nessus scan (SOP Section 8) alongside the
+  # Windows credential type on DC01/WS01 — switching to key-only auth
+  # would remove the exact capability this VM exists to show. Accepted
+  # risk, scoped tightly: SSH is limited to `var.allowed_source_ip` only
+  # (main.tf NSG rules), and the password itself is Terraform-generated
+  # and Key Vault-sourced, not a weak human-chosen one.
+  #tfsec:ignore:azure-compute-disable-password-authentication
   disable_password_authentication = false
 
   network_interface_ids = [azurerm_network_interface.ubuntu01.id]
@@ -404,8 +413,16 @@ resource "azurerm_linux_virtual_machine" "nessus01" {
   resource_group_name = azurerm_resource_group.rg.name
   size                = var.nessus_vm_size
 
-  admin_username                  = var.admin_username
-  admin_password                  = random_password.admin.result
+  admin_username = var.admin_username
+  admin_password = random_password.admin.result
+  # tfsec: azure-compute-disable-password-authentication — deliberately
+  # NOT disabled. Different reason than UBUNTU01: this is the box you
+  # (the human operator) SSH into by hand to install and activate Nessus
+  # (SOP Section 5) — key-only auth would mean generating, distributing,
+  # and managing an SSH keypair just for that one manual step. SSH stays
+  # scoped to `var.allowed_source_ip` only, and the password is
+  # Terraform-generated and Key Vault-sourced, not a weak human-chosen one.
+  #tfsec:ignore:azure-compute-disable-password-authentication
   disable_password_authentication = false
 
   network_interface_ids = [azurerm_network_interface.nessus01.id]
@@ -507,7 +524,7 @@ resource "azurerm_virtual_machine_extension" "dc01_promote_adds" {
 # why the join script above also retries.
 resource "time_sleep" "wait_for_dc01_promotion" {
   create_duration = "6m"
-  depends_on       = [azurerm_virtual_machine_extension.dc01_promote_adds]
+  depends_on      = [azurerm_virtual_machine_extension.dc01_promote_adds]
 }
 
 resource "azurerm_virtual_machine_extension" "ws01_domain_join" {
